@@ -4,6 +4,10 @@ from collections import deque
 import time
 
 # --- KONFIGURÁCIÓ ---
+# Itt tudod állítani, mi számít már elfogadhatónak (0.0 - 1.0)
+QUALITY_THRESHOLD = 0.4 
+
+# Alkatrészek méret-tartományai
 SHAPE_INVENTORY = [
     {"name": "Ful/Kicsi", "count": 2, "min": 8000, "max": 11000},
     {"name": "kozepes 3 szög", "count": 1, "min": 16600, "max": 18200}, 
@@ -12,28 +16,33 @@ SHAPE_INVENTORY = [
     {"name": "nyak/paralelogramma", "count": 1, "min": 19000, "max": 22000}
 ]
 
+# 10 eseményes memória a mozgóátlaghoz
 score_history = deque(maxlen=10)
 start_time = None  # Időzítő az alap észleléséhez
 
 def get_edges_from_contour(cnt, epsilon_coeff=0.02):
+    """Felbontja a kontúrt egyenes szakaszokra (élekre)."""
     epsilon = epsilon_coeff * cv2.arcLength(cnt, True)
     approx = cv2.approxPolyDP(cnt, epsilon, True)
     edges = []
     if len(approx) < 2: return edges
     for i in range(len(approx)):
-        p1, p2 = approx[i][0], approx[(i + 1) % len(approx)][0]
+        p1 = approx[i][0]
+        p2 = approx[(i + 1) % len(approx)][0]
         angle = np.degrees(np.arctan2(p2[1] - p1[1], p2[0] - p1[0]))
         mid_p = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
         edges.append({"angle": angle, "mid": mid_p})
     return edges
 
 def get_parallel_score(angle1, angle2):
+    """0.0 - 1.0 skála a párhuzamosságra."""
     diff = abs(angle1 - angle2) % 90
     if diff > 45: diff = abs(90 - diff)
     score = 1.0 - (diff / 12.0)
     return max(0.0, round(score, 2))
 
 def enhance_image(image):
+    """Szoftveres kontraszt és telítettség fokozás."""
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     h, s, v = cv2.split(hsv)
     s = cv2.add(s, 20)
@@ -42,40 +51,37 @@ def enhance_image(image):
 
 def analyze_frame(frame):
     global start_time, score_history
-    if frame is None: return work_frame
+    if frame is None: return None
 
     enhanced = enhance_image(frame)
     work_frame = enhanced.copy()
     hsv = cv2.cvtColor(work_frame, cv2.COLOR_BGR2HSV)
     
+    # Maszk a rózsaszín alaphoz
     mask = cv2.inRange(hsv, np.array([140, 40, 80]), np.array([175, 255, 255]))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7,7), np.uint8))
     
     contours, hierarchy = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
-    # --- ALAP ÉRZÉKELÉS ELLENŐRZÉSE ---
     base_idx = -1
     if contours and hierarchy is not None:
         max_a = 0
         for i, c in enumerate(contours):
             area = cv2.contourArea(c)
-            if area > 10000: # Csak ha elég nagy a rózsaszín folt
+            if area > 10000:
                 max_a, base_idx = area, i
 
+    # --- ALAP ÉRZÉKELÉS ELLENŐRZÉSE ---
     if base_idx == -1:
-        # HA NINCS ALAP: Nullázunk mindent
         start_time = None
         score_history.clear()
         cv2.putText(work_frame, "ALAP KERESESE...", (30, 60), 0, 1.2, (0, 165, 255), 3)
         return work_frame
 
-    # HA VAN ALAP: Indítjuk vagy kezeljük a stoppert
     if start_time is None:
         start_time = time.time()
     
     elapsed = time.time() - start_time
-    
-    # Alap élek kinyerése
     base_edges = get_edges_from_contour(contours[base_idx], 0.015)
     cv2.drawContours(work_frame, [contours[base_idx]], -1, (255, 0, 0), 2)
 
@@ -112,24 +118,26 @@ def analyze_frame(frame):
                 if m == inv["count"]: break
 
     f_idx = round(current_total / 7, 2) if found > 0 else 0.0
-    score_history.append(f_idx)
-    m_avg = round(sum(score_history)/len(score_history), 2)
+    if found > 0:
+        score_history.append(f_idx)
+    
+    m_avg = round(sum(score_history)/len(score_history), 2) if score_history else 0.0
 
     # --- KIJELZÉS LOGIKA ---
     if elapsed < 3.0:
-        # Első 3 másodperc: WAIT
+        # WAIT fázis (visszaszámlálás)
         cv2.putText(work_frame, f"WAIT... {int(4-elapsed)}s", (30, 60), 0, 1.5, (0, 255, 255), 3)
     else:
-        # 3 másodperc után: Értékelés
-        if m_avg >= 0.4:
+        # OK / NOK döntés a definiált küszöb alapján
+        if m_avg >= QUALITY_THRESHOLD:
             status, color = "OK", (0, 255, 0)
         else:
             status, color = "NOK", (0, 0, 255)
         
         cv2.putText(work_frame, f"STATUS: {status}", (30, 60), 0, 1.8, color, 4)
-        cv2.putText(work_frame, f"PONT: {m_avg}", (30, 110), 0, 1.0, (255, 255, 255), 2)
+        cv2.putText(work_frame, f"QUALITY: {m_avg}", (30, 110), 0, 1.0, (255, 255, 255), 2)
 
-    cv2.putText(work_frame, f"ELEMEK: {found}/7", (30, 150), 0, 0.7, (200, 200, 200), 1)
+    cv2.putText(work_frame, f"FOUND: {found}/7", (30, 150), 0, 0.7, (200, 200, 200), 1)
     
     return work_frame
 
@@ -147,9 +155,10 @@ if __name__ == "__main__":
             ret, frame = cap.read()
             if not ret: break
             output = analyze_frame(frame)
-            cv2.imshow("QS Precision Monitor", output)
+            if output is not None:
+                cv2.imshow("QS Precision Monitor", output)
             if cv2.waitKey(1) & 0xFF == ord('q'): break
         cap.release()
         cv2.destroyAllWindows()
     else:
-        print("Kamera nem található!")
+        print("Hiba: Kamera nem nyitható meg!")
