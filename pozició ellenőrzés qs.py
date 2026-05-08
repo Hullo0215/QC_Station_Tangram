@@ -128,7 +128,7 @@ def analyze_frame_no_roi(frame):
     return work_frame
 
 if __name__ == "__main__":
-    cap = cv2.VideoCapture(1) # Próbáld a 0-át, ha nincs kép
+    cap = cv2.VideoCapture(0) # Próbáld a 0-át, ha nincs kép
     cv2.namedWindow("QS Precision Monitor", cv2.WINDOW_NORMAL)
     
     while True:
